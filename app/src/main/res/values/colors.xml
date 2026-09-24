@@ -1,0 +1,5 @@
+<resources>
+    <color name="ic_launcher_background">#1E88E5</color>
+    <color name="overlay_bg">#CC000000</color>
+    <color name="overlay_text">#FFFFFF</color>
+</resources>
