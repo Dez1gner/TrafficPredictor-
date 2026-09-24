@@ -17,11 +17,10 @@ class TrackingService : Service() {
         const val CHANNEL_ID = "tracking_channel"
         const val NOTIF_ID = 1
 
-        // Расстояния в метрах
         const val APPROACH_RADIUS = 250.0
         const val STOP_RADIUS = 35.0
         const val EXIT_RADIUS = 60.0
-        const val SPEED_STOP_THRESHOLD = 1.3 // м/с (~4.7 км/ч)
+        const val SPEED_STOP_THRESHOLD = 1.3
     }
 
     private lateinit var fusedClient: FusedLocationProviderClient
@@ -68,9 +67,7 @@ class TrackingService : Service() {
                     overlay.setStatus("Светофор отмечен ✓")
                 }
             }
-        } catch (e: SecurityException) {
-            // нет разрешения - молча игнорируем, кнопка в MainActivity уже запросила его
-        }
+        } catch (e: SecurityException) { }
     }
 
     override fun onDestroy() {
@@ -87,9 +84,7 @@ class TrackingService : Service() {
             .build()
         try {
             fusedClient.requestLocationUpdates(request, locationCallback, mainLooper)
-        } catch (e: SecurityException) {
-            // нет разрешения - служба не сможет работать, но не падаем
-        }
+        } catch (e: SecurityException) { }
     }
 
     private fun onNewLocation(loc: Location) {
@@ -105,7 +100,6 @@ class TrackingService : Service() {
 
         if (dist <= APPROACH_RADIUS) {
             if (activeLightId != nearest.id) {
-                // начали приближаться к новому светофору
                 activeLightId = nearest.id
                 everWasClose = false
                 sawRed = false
@@ -122,9 +116,8 @@ class TrackingService : Service() {
                     stopStartMillis = null
                 }
             }
-            updateOverlayForLight(nearest)
+            updateOverlayForLight(nearest, dist, speed)
         } else if (dist > EXIT_RADIUS && activeLightId == nearest.id) {
-            // отъехали - фиксируем итог проезда, если реально подъезжали близко
             if (everWasClose) {
                 if (stopStartMillis != null) {
                     stopAccumSec += ((System.currentTimeMillis() - stopStartMillis!!) / 1000).toInt()
@@ -140,16 +133,26 @@ class TrackingService : Service() {
         }
     }
 
-    private fun updateOverlayForLight(light: com.courier.trafficpredictor.data.TrafficLight) {
+    private fun updateOverlayForLight(light: com.courier.trafficpredictor.data.TrafficLight, dist: Double, speedMs: Double) {
         val pred = LightsRepository.predict(light)
-        val text = if (pred.sampleSize < 3) {
-            "Светофор рядом: мало данных (${pred.sampleSize} поездок)"
-        } else {
-            val pct = ((pred.greenProbability ?: 0.0) * 100).toInt()
-            val stopInfo = pred.avgStopDurationSec?.let { ", стоим ~${it.toInt()} сек" } ?: ""
-            "Зелёный в $pct% случаев$stopInfo (${pred.sampleSize} поездок)"
+        val distText = String.format(Locale.getDefault(), "%.0f м", dist)
+
+        if (pred.sampleSize < 3) {
+            overlay.setStatus("До светофора $distText — данных пока мало (${pred.sampleSize} поездок)")
+            return
         }
-        overlay.setStatus(text)
+
+        val greenProb = pred.greenProbability ?: 0.0
+        val pct = (greenProb * 100).toInt()
+        val stopInfo = pred.avgStopDurationSec?.let { " (обычно стоим ~${it.toInt()}с)" } ?: ""
+
+        val advice = when {
+            greenProb >= 0.7 -> "ЗЕЛЁНЫЙ вероятно ($pct%) — держи скорость"
+            greenProb <= 0.3 -> "КРАСНЫЙ вероятно ($pct%)$stopInfo — сбрось газ"
+            else -> "Не ясно ($pct% зелёный) — будь готов тормозить"
+        }
+
+        overlay.setStatus("$distText: $advice")
     }
 
     private fun createChannel() {
