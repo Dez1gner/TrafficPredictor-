@@ -10,15 +10,11 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/**
- * Простое локальное хранилище (JSON-файл во внутренней памяти приложения).
- * Никакие данные никуда не отправляются - всё остаётся на телефоне.
- */
 object LightsRepository {
 
     private const val FILE_NAME = "lights_data.json"
-    private const val NEAR_LIGHT_RADIUS_M = 45.0 // считаем "тот же светофор" в этом радиусе
-    private const val WINDOW_MINUTES = 45 // окно времени для статистики "похожего времени суток"
+    private const val NEAR_LIGHT_RADIUS_M = 45.0
+    private const val WINDOW_MINUTES = 45
 
     val lights: MutableList<TrafficLight> = mutableListOf()
     val passages: MutableList<Passage> = mutableListOf()
@@ -52,22 +48,26 @@ object LightsRepository {
     }
 
     @Synchronized
-    fun addPassage(lightId: String, isRed: Boolean, stopDurationSec: Int) {
+    fun addPassage(
+        lightId: String,
+        isRed: Boolean,
+        stopDurationSec: Int,
+        prevLightId: String? = null,
+        secondsSincePrev: Int? = null
+    ) {
         passages.add(
             Passage(
                 lightId = lightId,
                 timestampMillis = System.currentTimeMillis(),
                 isRed = isRed,
-                stopDurationSec = stopDurationSec
+                stopDurationSec = stopDurationSec,
+                prevLightId = prevLightId,
+                secondsSincePrev = secondsSincePrev
             )
         )
         save()
     }
 
-    /**
-     * Прогноз по светофору на основе прошлых проездов в похожее время суток
-     * (тот же тип дня: будни/выходные, окно +/- WINDOW_MINUTES минут).
-     */
     fun predict(light: TrafficLight, atMillis: Long = System.currentTimeMillis()): Prediction {
         val cal = Calendar.getInstance().apply { timeInMillis = atMillis }
         val targetMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
@@ -100,6 +100,63 @@ object LightsRepository {
         return minOf(d, 24 * 60 - d)
     }
 
+    fun pacingAdvice(
+        light: TrafficLight,
+        prevLightId: String?,
+        secondsSincePrevNow: Int?,
+        remainingDistanceM: Double,
+        currentSpeedMs: Double,
+        atMillis: Long = System.currentTimeMillis()
+    ): PacingAdvice {
+        if (prevLightId != null && secondsSincePrevNow != null) {
+            val cal = Calendar.getInstance().apply { timeInMillis = atMillis }
+            val targetMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+            val targetWeekend = cal.get(Calendar.DAY_OF_WEEK) == Calendar.SATURDAY ||
+                cal.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY
+
+            val matched = passages.filter { p ->
+                p.lightId == light.id && p.prevLightId == prevLightId &&
+                    !p.isRed && p.secondsSincePrev != null
+            }.filter { p ->
+                val c = Calendar.getInstance().apply { timeInMillis = p.timestampMillis }
+                val mins = c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE)
+                val isWeekend = c.get(Calendar.DAY_OF_WEEK) == Calendar.SATURDAY ||
+                    c.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY
+                isWeekend == targetWeekend && minutesDiff(mins, targetMinutes) <= WINDOW_MINUTES
+            }
+
+            if (matched.size >= 3) {
+                val targetElapsed = matched.map { it.secondsSincePrev!! }.average()
+                val remainingBudget = targetElapsed - secondsSincePrevNow
+                return if (remainingBudget > 1.0) {
+                    val recommendedSpeedMs = remainingDistanceM / remainingBudget
+                    val kmh = (recommendedSpeedMs * 3.6).toInt()
+                    val curKmh = (currentSpeedMs * 3.6).toInt()
+                    when {
+                        recommendedSpeedMs > currentSpeedMs * 1.15 ->
+                            PacingAdvice("УСКОРЬСЯ до ~$kmh км/ч", "успеешь на зелёный (${matched.size} похожих поездок)")
+                        recommendedSpeedMs < currentSpeedMs * 0.85 ->
+                            PacingAdvice("НЕ СПЕШИ, ~$kmh км/ч хватит", "и так успеешь на зелёный")
+                        else ->
+                            PacingAdvice("Держи ~$curKmh км/ч", "должен успеть на зелёный")
+                    }
+                } else {
+                    PacingAdvice("СБРОСЬ ГАЗ", "по обычному графику будет красный")
+                }
+            }
+        }
+
+        val pred = predict(light, atMillis)
+        if (pred.sampleSize < 3) return PacingAdvice("Мало данных", "${pred.sampleSize} поездок")
+        val greenProb = pred.greenProbability ?: 0.0
+        val pct = (greenProb * 100).toInt()
+        return when {
+            greenProb >= 0.7 -> PacingAdvice("Скорее ЗЕЛЁНЫЙ", "$pct% случаев — держи скорость")
+            greenProb <= 0.3 -> PacingAdvice("Скорее КРАСНЫЙ", "$pct% зелёных — сбрось газ")
+            else -> PacingAdvice("Не ясно", "$pct% зелёных — будь готов тормозить")
+        }
+    }
+
     fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val r = 6371000.0
         val dLat = Math.toRadians(lat2 - lat1)
@@ -128,13 +185,13 @@ object LightsRepository {
                         o.getString("lightId"),
                         o.getLong("ts"),
                         o.getBoolean("isRed"),
-                        o.getInt("stopSec")
+                        o.getInt("stopSec"),
+                        if (o.has("prevLightId") && !o.isNull("prevLightId")) o.getString("prevLightId") else null,
+                        if (o.has("secSincePrev") && !o.isNull("secSincePrev")) o.getInt("secSincePrev") else null
                     )
                 )
             }
-        } catch (e: Exception) {
-            // повреждённый файл - начинаем с чистого листа, ничего не роняем
-        }
+        } catch (e: Exception) { }
     }
 
     @Synchronized
@@ -151,6 +208,8 @@ object LightsRepository {
             passagesArr.put(JSONObject().apply {
                 put("lightId", it.lightId); put("ts", it.timestampMillis)
                 put("isRed", it.isRed); put("stopSec", it.stopDurationSec)
+                put("prevLightId", it.prevLightId ?: JSONObject.NULL)
+                put("secSincePrev", it.secondsSincePrev ?: JSONObject.NULL)
             })
         }
         root.put("lights", lightsArr)
