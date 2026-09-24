@@ -53,6 +53,10 @@ class MainActivity : AppCompatActivity() {
 
         btnStartStop.setOnClickListener {
             if (!tracking) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+                    Toast.makeText(this, "Сначала разреши показ поверх экрана (кнопка выше)", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
                 if (!hasLocationPermissions()) {
                     requestLocationPermissions()
                     return@setOnClickListener
@@ -61,7 +65,10 @@ class MainActivity : AppCompatActivity() {
                 ContextCompat.startForegroundService(this, intent)
                 tracking = true
                 btnStartStop.text = "Остановить запись"
-                statusText.text = "Статус: запись идёт"
+                statusText.text = "Статус: запись идёт (см. панельку поверх экрана)"
+                Toast.makeText(this, "Запись начата. Сворачиваю приложение — переключись на навигатор", Toast.LENGTH_LONG).show()
+                // Сразу уходим в фон, чтобы не загораживать экран навигатора
+                moveTaskToBack(true)
             } else {
                 stopService(Intent(this, TrackingService::class.java))
                 tracking = false
@@ -102,7 +109,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestLocationPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Сначала обычный доступ, потом отдельным диалогом - фоновый (так требует Android)
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(
                     this,
