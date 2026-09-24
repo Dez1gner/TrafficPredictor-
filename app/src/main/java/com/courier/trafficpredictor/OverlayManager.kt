@@ -12,11 +12,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import kotlin.math.abs
 
-/**
- * Компактная плавающая панелька поверх других приложений (в т.ч. поверх навигатора):
- * большая кнопка "Светофор" (легко попасть в тряске), маленькая кнопка "Стоп"
- * и тонкая строка статуса. Панельку можно перетащить пальцем в удобное место.
- */
 class OverlayManager(
     private val context: Context,
     private val onMarkLight: () -> Unit,
@@ -26,6 +21,7 @@ class OverlayManager(
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var rootView: LinearLayout? = null
     private var statusText: TextView? = null
+    private var detailText: TextView? = null
     private lateinit var params: WindowManager.LayoutParams
 
     fun showPanel() {
@@ -70,14 +66,24 @@ class OverlayManager(
 
         val status = TextView(context).apply {
             setTextColor(Color.WHITE)
-            textSize = 11f
+            textSize = 22f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
             text = ""
-            setPadding(dp(2), dp(6), dp(2), dp(0))
+            setPadding(dp(2), dp(10), dp(2), dp(0))
         }
         statusText = status
 
+        val detail = TextView(context).apply {
+            setTextColor(Color.parseColor("#CCCCCC"))
+            textSize = 12f
+            text = ""
+            setPadding(dp(2), dp(2), dp(2), dp(0))
+        }
+        detailText = detail
+
         container.addView(buttonsRow)
         container.addView(status)
+        container.addView(detail)
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -95,7 +101,6 @@ class OverlayManager(
         params.x = dp(12)
         params.y = dp(60)
 
-        // Перетаскивание панели пальцем (по фону контейнера, не по кнопкам)
         var touchStartX = 0
         var touchStartY = 0
         var startRawX = 0f
@@ -133,8 +138,9 @@ class OverlayManager(
         rootView = container
     }
 
-    fun setStatus(text: String) {
-        statusText?.text = text
+    fun setStatus(headline: String, detail: String = "") {
+        statusText?.text = headline
+        detailText?.text = detail
     }
 
     fun hide() {
@@ -145,5 +151,6 @@ class OverlayManager(
         }
         rootView = null
         statusText = null
+        detailText = null
     }
 }
