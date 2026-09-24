@@ -44,14 +44,33 @@ class TrackingService : Service() {
         super.onCreate()
         LightsRepository.init(applicationContext)
         fusedClient = LocationServices.getFusedLocationProviderClient(this)
-        overlay = OverlayManager(applicationContext)
+        overlay = OverlayManager(
+            applicationContext,
+            onMarkLight = { markLightAtCurrentLocation() },
+            onStop = { stopSelf() }
+        )
         createChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIF_ID, buildNotification("Слежение включено"))
         startLocationUpdates()
+        overlay.showPanel()
+        overlay.setStatus("Едем...")
         return START_STICKY
+    }
+
+    private fun markLightAtCurrentLocation() {
+        try {
+            fusedClient.lastLocation.addOnSuccessListener { loc ->
+                if (loc != null) {
+                    LightsRepository.addLightIfNew(loc.latitude, loc.longitude)
+                    overlay.setStatus("Светофор отмечен ✓")
+                }
+            }
+        } catch (e: SecurityException) {
+            // нет разрешения - молча игнорируем, кнопка в MainActivity уже запросила его
+        }
     }
 
     override fun onDestroy() {
@@ -78,7 +97,7 @@ class TrackingService : Service() {
         val nearest = LightsRepository.findNearest(loc.latitude, loc.longitude)
 
         if (nearest == null) {
-            overlay.show("Светофоры ещё не отмечены на этом участке")
+            overlay.setStatus("Светофоры ещё не отмечены")
             return
         }
 
@@ -115,9 +134,9 @@ class TrackingService : Service() {
             }
             activeLightId = null
             everWasClose = false
-            overlay.show("Едем дальше...")
+            overlay.setStatus("Едем дальше...")
         } else {
-            overlay.show(String.format(Locale.getDefault(), "До ближайшего светофора: %.0f м", dist))
+            overlay.setStatus(String.format(Locale.getDefault(), "До светофора: %.0f м", dist))
         }
     }
 
@@ -127,10 +146,10 @@ class TrackingService : Service() {
             "Светофор рядом: мало данных (${pred.sampleSize} поездок)"
         } else {
             val pct = ((pred.greenProbability ?: 0.0) * 100).toInt()
-            val stopInfo = pred.avgStopDurationSec?.let { ", обычно стоим ~${it.toInt()} сек" } ?: ""
-            "Светофор рядом: зелёный в $pct% случаев$stopInfo (на основе ${pred.sampleSize} поездок)"
+            val stopInfo = pred.avgStopDurationSec?.let { ", стоим ~${it.toInt()} сек" } ?: ""
+            "Зелёный в $pct% случаев$stopInfo (${pred.sampleSize} поездок)"
         }
-        overlay.show(text)
+        overlay.setStatus(text)
     }
 
     private fun createChannel() {
