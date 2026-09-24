@@ -32,6 +32,9 @@ class TrackingService : Service() {
     private var stopStartMillis: Long? = null
     private var stopAccumSec = 0
 
+    private var lastDepartureLightId: String? = null
+    private var lastDepartureTimeMillis: Long? = null
+
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             val loc = result.lastLocation ?: return
@@ -55,7 +58,7 @@ class TrackingService : Service() {
         startForeground(NOTIF_ID, buildNotification("Слежение включено"))
         startLocationUpdates()
         overlay.showPanel()
-        overlay.setStatus("Едем...")
+        overlay.setStatus("Едем...", "")
         return START_STICKY
     }
 
@@ -64,7 +67,7 @@ class TrackingService : Service() {
             fusedClient.lastLocation.addOnSuccessListener { loc ->
                 if (loc != null) {
                     LightsRepository.addLightIfNew(loc.latitude, loc.longitude)
-                    overlay.setStatus("Светофор отмечен ✓")
+                    overlay.setStatus("Отмечено ✓", "")
                 }
             }
         } catch (e: SecurityException) { }
@@ -92,7 +95,7 @@ class TrackingService : Service() {
         val nearest = LightsRepository.findNearest(loc.latitude, loc.longitude)
 
         if (nearest == null) {
-            overlay.setStatus("Светофоры ещё не отмечены")
+            overlay.setStatus("Нет светофоров", "начни отмечать кнопкой")
             return
         }
 
@@ -123,36 +126,39 @@ class TrackingService : Service() {
                     stopAccumSec += ((System.currentTimeMillis() - stopStartMillis!!) / 1000).toInt()
                     stopStartMillis = null
                 }
-                LightsRepository.addPassage(nearest.id, sawRed, stopAccumSec)
+                val departureNow = System.currentTimeMillis()
+                val secondsSincePrev = lastDepartureTimeMillis?.let {
+                    ((departureNow - it) / 1000).toInt()
+                }
+                LightsRepository.addPassage(
+                    nearest.id, sawRed, stopAccumSec,
+                    prevLightId = lastDepartureLightId,
+                    secondsSincePrev = secondsSincePrev
+                )
+                lastDepartureLightId = nearest.id
+                lastDepartureTimeMillis = departureNow
             }
             activeLightId = null
             everWasClose = false
-            overlay.setStatus("Едем дальше...")
+            overlay.setStatus("Едем дальше", "")
         } else {
-            overlay.setStatus(String.format(Locale.getDefault(), "До светофора: %.0f м", dist))
+            overlay.setStatus(String.format(Locale.getDefault(), "%.0f м", dist), "до следующего светофора")
         }
     }
 
     private fun updateOverlayForLight(light: com.courier.trafficpredictor.data.TrafficLight, dist: Double, speedMs: Double) {
-        val pred = LightsRepository.predict(light)
-        val distText = String.format(Locale.getDefault(), "%.0f м", dist)
-
-        if (pred.sampleSize < 3) {
-            overlay.setStatus("До светофора $distText — данных пока мало (${pred.sampleSize} поездок)")
-            return
+        val secondsSincePrevNow = lastDepartureTimeMillis?.let {
+            ((System.currentTimeMillis() - it) / 1000).toInt()
         }
-
-        val greenProb = pred.greenProbability ?: 0.0
-        val pct = (greenProb * 100).toInt()
-        val stopInfo = pred.avgStopDurationSec?.let { " (обычно стоим ~${it.toInt()}с)" } ?: ""
-
-        val advice = when {
-            greenProb >= 0.7 -> "ЗЕЛЁНЫЙ вероятно ($pct%) — держи скорость"
-            greenProb <= 0.3 -> "КРАСНЫЙ вероятно ($pct%)$stopInfo — сбрось газ"
-            else -> "Не ясно ($pct% зелёный) — будь готов тормозить"
-        }
-
-        overlay.setStatus("$distText: $advice")
+        val advice = LightsRepository.pacingAdvice(
+            light = light,
+            prevLightId = lastDepartureLightId,
+            secondsSincePrevNow = secondsSincePrevNow,
+            remainingDistanceM = dist,
+            currentSpeedMs = speedMs
+        )
+        val distText = String.format(Locale.getDefault(), "%.0f м • ", dist)
+        overlay.setStatus(advice.headline, distText + advice.detail)
     }
 
     private fun createChannel() {
